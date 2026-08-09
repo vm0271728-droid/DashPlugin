@@ -1,0 +1,5 @@
+name: DashPlugin
+version: 1.0
+main: com.example.dash.DashPlugin
+api-version: "1.21"
+description: Shift+Right-click to dash forward (10s cooldown)
