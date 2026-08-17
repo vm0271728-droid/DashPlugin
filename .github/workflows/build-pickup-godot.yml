@@ -64,22 +64,13 @@ jobs:
             keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Initialize Godot settings and import project
+      - name: Import project with Godot
         shell: bash
+        env:
+          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
-          ./godot --headless --editor --path project --quit-after 3 || true
-          SETTINGS=$(find "$HOME/.config/godot" -maxdepth 1 -name 'editor_settings-4*.tres' -print -quit)
-          if [ -z "$SETTINGS" ]; then
-            echo "Godot editor settings file not found"
-            find "$HOME/.config/godot" -maxdepth 2 -type f -print || true
-            exit 1
-          fi
-          echo "Using settings: $SETTINGS"
-          printf '\nexport/android/android_sdk_path = "%s"\n' "$ANDROID_SDK_ROOT" >> "$SETTINGS"
-          printf 'export/android/java_sdk_path = "%s"\n' "$JAVA_HOME" >> "$SETTINGS"
-          printf 'export/android/debug_keystore = "%s"\n' "$HOME/.android/debug.keystore" >> "$SETTINGS"
-          printf 'export/android/debug_keystore_user = "androiddebugkey"\n' >> "$SETTINGS"
-          printf 'export/android/debug_keystore_pass = "android"\n' >> "$SETTINGS"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT"
           ./godot --headless --editor --path project --quit-after 8
 
       - name: Build APK with Godot
@@ -89,6 +80,7 @@ jobs:
           GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
           GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
         run: |
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
           cp "$HOME/.android/debug.keystore" "$GITHUB_WORKSPACE/debug.keystore"
           mkdir -p "$GITHUB_WORKSPACE/out"
           set -o pipefail
