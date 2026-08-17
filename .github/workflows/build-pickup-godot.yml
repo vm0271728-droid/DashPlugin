@@ -96,6 +96,7 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs out/Pickup_Suspension_Test_Godot.apk | tee out/apksigner.txt
 
       - name: Upload APK and logs
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: Pickup-Suspension-Test-Godot-APK
@@ -103,5 +104,5 @@ jobs:
             out/Pickup_Suspension_Test_Godot.apk
             out/godot-export.log
             out/apksigner.txt
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 7
