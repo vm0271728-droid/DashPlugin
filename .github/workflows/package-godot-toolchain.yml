@@ -1,0 +1,74 @@
+name: Package Godot Android Toolchain
+
+on:
+  push:
+    branches:
+      - tmp/pickup-godot-apk
+    paths:
+      - .github/workflows/package-godot-toolchain.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "build-tools;35.0.1" \
+            "platforms;android-35" \
+            "cmdline-tools;latest"
+
+      - name: Download Godot 4.7.1 and Android templates
+        shell: bash
+        run: |
+          mkdir -p bundle/godot bundle/templates
+          wget -q https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip -O /tmp/godot.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          cp /tmp/godot/Godot_v4.7.1-stable_linux.x86_64 bundle/godot/godot
+          chmod +x bundle/godot/godot
+          wget -q https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz -O /tmp/templates.tpz
+          unzip -q /tmp/templates.tpz -d /tmp/templates
+          cp -a /tmp/templates/templates/. bundle/templates/
+          bundle/godot/godot --version
+          test -f bundle/templates/android_debug.apk
+
+      - name: Copy minimal Android SDK
+        shell: bash
+        run: |
+          mkdir -p bundle/android-sdk/build-tools bundle/android-sdk/platforms bundle/android-sdk/platform-tools bundle/android-sdk/cmdline-tools bundle/android-sdk/licenses
+          cp -a "$ANDROID_SDK_ROOT/build-tools/35.0.1" bundle/android-sdk/build-tools/
+          cp -a "$ANDROID_SDK_ROOT/platforms/android-35" bundle/android-sdk/platforms/
+          cp -a "$ANDROID_SDK_ROOT/platform-tools/." bundle/android-sdk/platform-tools/
+          cp -a "$ANDROID_SDK_ROOT/cmdline-tools/latest" bundle/android-sdk/cmdline-tools/
+          cp -a "$ANDROID_SDK_ROOT/licenses/." bundle/android-sdk/licenses/ || true
+          du -sh bundle/*
+
+      - name: Archive toolchain
+        shell: bash
+        run: |
+          tar -C bundle -I 'zstd -T0 -5' -cf Godot-4.7.1-Android-toolchain.tar.zst godot templates android-sdk
+          sha256sum Godot-4.7.1-Android-toolchain.tar.zst > Godot-4.7.1-Android-toolchain.sha256
+          ls -lh Godot-4.7.1-Android-toolchain.tar.zst
+
+      - name: Upload toolchain
+        uses: actions/upload-artifact@v4
+        with:
+          name: Godot-4.7.1-Android-toolchain
+          path: |
+            Godot-4.7.1-Android-toolchain.tar.zst
+            Godot-4.7.1-Android-toolchain.sha256
+          compression-level: 0
+          retention-days: 1
