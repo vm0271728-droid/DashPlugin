@@ -22,6 +22,40 @@ jobs:
           unzip -q pickup_project.zip -d project
           rm -rf project/.github
 
+      - name: Patch Android export settings
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          preset = Path('project/export_presets.cfg')
+          text = preset.read_text(encoding='utf-8')
+          lines = []
+          for line in text.splitlines():
+              if line.startswith('gradle_build/min_sdk='):
+                  continue
+              if line.startswith('gradle_build/target_sdk='):
+                  continue
+              lines.append(line)
+          preset.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+
+          project = Path('project/project.godot')
+          text = project.read_text(encoding='utf-8')
+          key = 'textures/vram_compression/import_etc2_astc'
+          if key not in text:
+              section = '[rendering]'
+              if section in text:
+                  pos = text.index(section) + len(section)
+                  text = text[:pos] + '\n' + key + '=true' + text[pos:]
+              else:
+                  text = text.rstrip() + '\n\n[rendering]\n' + key + '=true\n'
+              project.write_text(text, encoding='utf-8')
+          PY
+          echo '--- Android preset ---'
+          grep -E '^(name=|platform=|gradle_build/|architectures/)' project/export_presets.cfg || true
+          echo '--- VRAM compression ---'
+          grep -n 'vram_compression\|import_etc2' project/project.godot || true
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
