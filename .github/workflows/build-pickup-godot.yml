@@ -35,13 +35,7 @@ jobs:
         shell: bash
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
-            "platform-tools" \
-            "build-tools;35.0.1" \
-            "platforms;android-35" \
-            "cmdline-tools;latest" \
-            "cmake;3.10.2.4988404" \
-            "ndk;28.1.13356709"
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" "platform-tools" "build-tools;35.0.1" "platforms;android-35" "cmdline-tools;latest" "cmake;3.10.2.4988404" "ndk;28.1.13356709"
 
       - name: Install Godot 4.7.1
         shell: bash
@@ -67,15 +61,10 @@ jobs:
         run: |
           mkdir -p "$HOME/.android"
           if [ ! -f "$HOME/.android/debug.keystore" ]; then
-            keytool -genkeypair -v \
-              -keystore "$HOME/.android/debug.keystore" \
-              -storepass android -keypass android \
-              -alias androiddebugkey \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname "CN=Android Debug,O=Android,C=US"
+            keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-      - name: Initialize Godot editor settings and import project
+      - name: Initialize Godot settings and import project
         shell: bash
         run: |
           ./godot --headless --editor --path project --quit-after 3 || true
@@ -86,29 +75,12 @@ jobs:
             exit 1
           fi
           echo "Using settings: $SETTINGS"
-          python3 - "$SETTINGS" "$ANDROID_SDK_ROOT" "$JAVA_HOME" <<'PY'
-import re, sys
-p, sdk, java = sys.argv[1:]
-s = open(p, encoding='utf-8').read()
-vals = {
-    'export/android/android_sdk_path': sdk,
-    'export/android/java_sdk_path': java,
-    'export/android/debug_keystore': __import__('os').path.expanduser('~/.android/debug.keystore'),
-    'export/android/debug_keystore_user': 'androiddebugkey',
-    'export/android/debug_keystore_pass': 'android',
-}
-for k, v in vals.items():
-    line = f'{k} = "{v}"'
-    pat = re.compile(r'^' + re.escape(k) + r'\s*=.*$', re.M)
-    if pat.search(s):
-        s = pat.sub(line, s)
-    else:
-        if not s.endswith('\n'):
-            s += '\n'
-        s += line + '\n'
-open(p, 'w', encoding='utf-8').write(s)
-PY
-          ./godot --headless --editor --path project --quit-after 5
+          printf '\nexport/android/android_sdk_path = "%s"\n' "$ANDROID_SDK_ROOT" >> "$SETTINGS"
+          printf 'export/android/java_sdk_path = "%s"\n' "$JAVA_HOME" >> "$SETTINGS"
+          printf 'export/android/debug_keystore = "%s"\n' "$HOME/.android/debug.keystore" >> "$SETTINGS"
+          printf 'export/android/debug_keystore_user = "androiddebugkey"\n' >> "$SETTINGS"
+          printf 'export/android/debug_keystore_pass = "android"\n' >> "$SETTINGS"
+          ./godot --headless --editor --path project --quit-after 8
 
       - name: Build APK with Godot
         shell: bash
@@ -119,6 +91,7 @@ PY
         run: |
           cp "$HOME/.android/debug.keystore" "$GITHUB_WORKSPACE/debug.keystore"
           mkdir -p "$GITHUB_WORKSPACE/out"
+          set -o pipefail
           ./godot --headless --path project --verbose --export-debug "Android" "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk" 2>&1 | tee "$GITHUB_WORKSPACE/out/godot-export.log"
           test -s "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk"
           unzip -t "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk" >/dev/null
