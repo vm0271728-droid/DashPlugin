@@ -1,0 +1,142 @@
+name: Build Pickup Godot APK
+
+on:
+  push:
+    branches:
+      - tmp/pickup-godot-apk
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack project
+        run: |
+          mkdir -p project
+          unzip -q pickup_project.zip -d project
+          rm -rf project/.github
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install required Android packages
+        shell: bash
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager --sdk_root="$ANDROID_SDK_ROOT" \
+            "platform-tools" \
+            "build-tools;35.0.1" \
+            "platforms;android-35" \
+            "cmdline-tools;latest" \
+            "cmake;3.10.2.4988404" \
+            "ndk;28.1.13356709"
+
+      - name: Install Godot 4.7.1
+        shell: bash
+        run: |
+          wget -q --show-progress https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_linux.x86_64.zip
+          unzip -q Godot_v4.7.1-stable_linux.x86_64.zip
+          mv Godot_v4.7.1-stable_linux.x86_64 godot
+          chmod +x godot
+          ./godot --version
+
+      - name: Install Godot Android export templates
+        shell: bash
+        run: |
+          wget -q --show-progress https://github.com/godotengine/godot-builds/releases/download/4.7.1-stable/Godot_v4.7.1-stable_export_templates.tpz
+          rm -rf /tmp/godot_templates
+          mkdir -p /tmp/godot_templates "$HOME/.local/share/godot/export_templates/4.7.1.stable"
+          unzip -q Godot_v4.7.1-stable_export_templates.tpz -d /tmp/godot_templates
+          cp -a /tmp/godot_templates/templates/. "$HOME/.local/share/godot/export_templates/4.7.1.stable/"
+          test -f "$HOME/.local/share/godot/export_templates/4.7.1.stable/android_debug.apk"
+
+      - name: Prepare debug signing key
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android -keypass android \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Initialize Godot editor settings and import project
+        shell: bash
+        run: |
+          ./godot --headless --editor --path project --quit-after 3 || true
+          SETTINGS=$(find "$HOME/.config/godot" -maxdepth 1 -name 'editor_settings-4*.tres' -print -quit)
+          if [ -z "$SETTINGS" ]; then
+            echo "Godot editor settings file not found"
+            find "$HOME/.config/godot" -maxdepth 2 -type f -print || true
+            exit 1
+          fi
+          echo "Using settings: $SETTINGS"
+          python3 - "$SETTINGS" "$ANDROID_SDK_ROOT" "$JAVA_HOME" <<'PY'
+import re, sys
+p, sdk, java = sys.argv[1:]
+s = open(p, encoding='utf-8').read()
+vals = {
+    'export/android/android_sdk_path': sdk,
+    'export/android/java_sdk_path': java,
+    'export/android/debug_keystore': __import__('os').path.expanduser('~/.android/debug.keystore'),
+    'export/android/debug_keystore_user': 'androiddebugkey',
+    'export/android/debug_keystore_pass': 'android',
+}
+for k, v in vals.items():
+    line = f'{k} = "{v}"'
+    pat = re.compile(r'^' + re.escape(k) + r'\s*=.*$', re.M)
+    if pat.search(s):
+        s = pat.sub(line, s)
+    else:
+        if not s.endswith('\n'):
+            s += '\n'
+        s += line + '\n'
+open(p, 'w', encoding='utf-8').write(s)
+PY
+          ./godot --headless --editor --path project --quit-after 5
+
+      - name: Build APK with Godot
+        shell: bash
+        env:
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH: ${{ github.workspace }}/debug.keystore
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER: androiddebugkey
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD: android
+        run: |
+          cp "$HOME/.android/debug.keystore" "$GITHUB_WORKSPACE/debug.keystore"
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          ./godot --headless --path project --verbose --export-debug "Android" "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk" 2>&1 | tee "$GITHUB_WORKSPACE/out/godot-export.log"
+          test -s "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk"
+          unzip -t "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk" >/dev/null
+          ls -lh "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk"
+
+      - name: Verify APK signature
+        shell: bash
+        run: |
+          APKSIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs out/Pickup_Suspension_Test_Godot.apk | tee out/apksigner.txt
+
+      - name: Upload APK and logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: Pickup-Suspension-Test-Godot-APK
+          path: |
+            out/Pickup_Suspension_Test_Godot.apk
+            out/godot-export.log
+            out/apksigner.txt
+          if-no-files-found: error
+          retention-days: 7
