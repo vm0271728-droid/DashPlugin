@@ -18,15 +18,24 @@ jobs:
 
       - name: Unpack project
         run: |
-          mkdir -p project
+          rm -rf project out
+          mkdir -p project out
           unzip -q pickup_project.zip -d project
           rm -rf project/.github
 
-      - name: Patch Android export settings
+      - name: Patch project for Godot 4.7
         shell: bash
         run: |
           python3 - <<'PY'
           from pathlib import Path
+
+          # The previous APK was installable but the exported main script had
+          # GDScript type-inference parse errors. Godot still produced an APK,
+          # which is why it launched to an empty black/gray screen.
+          for gd in Path('project').rglob('*.gd'):
+              text = gd.read_text(encoding='utf-8')
+              text = text.replace(':=', '=')
+              gd.write_text(text, encoding='utf-8')
 
           preset = Path('project/export_presets.cfg')
           text = preset.read_text(encoding='utf-8')
@@ -41,20 +50,58 @@ jobs:
 
           project = Path('project/project.godot')
           text = project.read_text(encoding='utf-8')
-          key = 'textures/vram_compression/import_etc2_astc'
-          if key not in text:
-              section = '[rendering]'
-              if section in text:
-                  pos = text.index(section) + len(section)
-                  text = text[:pos] + '\n' + key + '=true' + text[pos:]
-              else:
-                  text = text.rstrip() + '\n\n[rendering]\n' + key + '=true\n'
-              project.write_text(text, encoding='utf-8')
+
+          if '[application]' not in text:
+              text += '\n[application]\n'
+          if 'config/icon=' not in text:
+              pos = text.index('[application]') + len('[application]')
+              text = text[:pos] + '\nconfig/icon="res://icon.svg"' + text[pos:]
+
+          if '[display]' not in text:
+              text += '\n[display]\n'
+          display_lines = {
+              'window/size/viewport_width': '1280',
+              'window/size/viewport_height': '720',
+              'window/stretch/mode': '"canvas_items"',
+              'window/handheld/orientation': '1',
+          }
+          for key, value in display_lines.items():
+              if key not in text:
+                  pos = text.index('[display]') + len('[display]')
+                  text = text[:pos] + f'\n{key}={value}' + text[pos:]
+
+          if '[rendering]' not in text:
+              text += '\n[rendering]\n'
+          rendering_lines = {
+              'renderer/rendering_method': '"gl_compatibility"',
+              'renderer/rendering_method.mobile': '"gl_compatibility"',
+              'textures/vram_compression/import_etc2_astc': 'true',
+          }
+          for key, value in rendering_lines.items():
+              if key not in text:
+                  pos = text.index('[rendering]') + len('[rendering]')
+                  text = text[:pos] + f'\n{key}={value}' + text[pos:]
+
+          project.write_text(text, encoding='utf-8')
+
+          # Text SVG icon so the build has a real launcher icon without binary tooling.
+          Path('project/icon.svg').write_text('''<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+          <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#101820"/><stop offset="1" stop-color="#263746"/></linearGradient></defs>
+          <rect width="512" height="512" rx="112" fill="url(#g)"/>
+          <path d="M86 302h32l26-78c6-18 20-30 39-30h133c16 0 30 8 39 21l43 63h28c13 0 24 11 24 24v42h-32c-6-33-35-58-70-58s-64 25-70 58H218c-6-33-35-58-70-58s-64 25-70 58H62v-18c0-13 11-24 24-24z" fill="#e8eef4"/>
+          <circle cx="148" cy="348" r="43" fill="#0b1117" stroke="#6fd3ff" stroke-width="14"/>
+          <circle cx="348" cy="348" r="43" fill="#0b1117" stroke="#6fd3ff" stroke-width="14"/>
+          <path d="M188 196h92v74h-118l20-59c2-7 4-11 6-15zm111 0h17c9 0 16 4 21 11l42 63h-80v-74z" fill="#6fd3ff" opacity=".9"/>
+          <path d="M252 334l-24 48m56-48l-24 48" stroke="#ff9e3d" stroke-width="13" stroke-linecap="round"/>
+          </svg>''', encoding='utf-8')
           PY
-          echo '--- Android preset ---'
-          grep -E '^(name=|platform=|gradle_build/|architectures/)' project/export_presets.cfg || true
-          echo '--- VRAM compression ---'
-          grep -n 'vram_compression\|import_etc2' project/project.godot || true
+
+          echo '--- Patched GDScript inference operators ---'
+          grep -RIn ':=' project --include='*.gd' || true
+          echo '--- Main scene ---'
+          grep -n 'run/main_scene' project/project.godot || true
+          echo '--- Icon ---'
+          grep -n 'config/icon' project/project.godot || true
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -100,12 +147,27 @@ jobs:
 
       - name: Import project with Godot
         shell: bash
-        env:
-          ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
         run: |
           export ANDROID_HOME="$ANDROID_SDK_ROOT"
           export ANDROID_SDK_ROOT="$ANDROID_SDK_ROOT"
-          ./godot --headless --editor --path project --quit-after 8
+          ./godot --headless --editor --path project --quit-after 8 2>&1 | tee out/godot-import.log
+
+      - name: Runtime preflight
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          ./godot --headless --path project --quit-after 5 --verbose 2>&1 | tee out/runtime-preflight.log
+          RC=${PIPESTATUS[0]}
+          set -e
+          if grep -E 'SCRIPT ERROR|Parse Error|Failed to load script' out/runtime-preflight.log; then
+            echo 'Runtime preflight found a script error.'
+            exit 1
+          fi
+          if [ "$RC" -ne 0 ]; then
+            echo "Godot runtime preflight exited with code $RC"
+            exit "$RC"
+          fi
 
       - name: Build APK with Godot
         shell: bash
@@ -116,26 +178,31 @@ jobs:
         run: |
           export ANDROID_HOME="$ANDROID_SDK_ROOT"
           cp "$HOME/.android/debug.keystore" "$GITHUB_WORKSPACE/debug.keystore"
-          mkdir -p "$GITHUB_WORKSPACE/out"
           set -o pipefail
-          ./godot --headless --path project --verbose --export-debug "Android" "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk" 2>&1 | tee "$GITHUB_WORKSPACE/out/godot-export.log"
-          test -s "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk"
-          unzip -t "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk" >/dev/null
-          ls -lh "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot.apk"
+          ./godot --headless --path project --verbose --export-debug "Android" "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot_fixed.apk" 2>&1 | tee "$GITHUB_WORKSPACE/out/godot-export.log"
+          if grep -E 'SCRIPT ERROR|Parse Error|Failed to load script' "$GITHUB_WORKSPACE/out/godot-export.log"; then
+            echo 'Export log contains script errors.'
+            exit 1
+          fi
+          test -s "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot_fixed.apk"
+          unzip -t "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot_fixed.apk" >/dev/null
+          ls -lh "$GITHUB_WORKSPACE/out/Pickup_Suspension_Test_Godot_fixed.apk"
 
       - name: Verify APK signature
         shell: bash
         run: |
           APKSIGNER=$(find "$ANDROID_SDK_ROOT/build-tools" -name apksigner -type f | sort -V | tail -1)
-          "$APKSIGNER" verify --verbose --print-certs out/Pickup_Suspension_Test_Godot.apk | tee out/apksigner.txt
+          "$APKSIGNER" verify --verbose --print-certs out/Pickup_Suspension_Test_Godot_fixed.apk | tee out/apksigner.txt
 
       - name: Upload APK and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Pickup-Suspension-Test-Godot-APK
+          name: Pickup-Suspension-Test-Godot-FIXED
           path: |
-            out/Pickup_Suspension_Test_Godot.apk
+            out/Pickup_Suspension_Test_Godot_fixed.apk
+            out/godot-import.log
+            out/runtime-preflight.log
             out/godot-export.log
             out/apksigner.txt
           if-no-files-found: warn
