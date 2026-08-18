@@ -1,0 +1,54 @@
+name: Capture Voxel Build Run ID
+
+on:
+  push:
+    branches:
+      - voxel-apk-build
+    paths:
+      - 'voxel_survival_godot/**'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: voxel-apk-build
+
+      - name: Find matching build run and publish ID
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+          run_id=""
+          for attempt in $(seq 1 30); do
+            run_id="$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow build-voxel-android.yml \
+              --branch voxel-apk-build \
+              --event push \
+              --limit 20 \
+              --json databaseId,headSha \
+              --jq '.[] | select(.headSha == env.EXPECTED_SHA) | .databaseId' \
+              | head -n1)"
+            if [ -n "$run_id" ]; then
+              break
+            fi
+            sleep 5
+          done
+          test -n "$run_id"
+          mkdir -p ci
+          printf '%s\n' "$run_id" > ci/last_voxel_build_run.txt
+          printf '%s\n' "$EXPECTED_SHA" > ci/last_voxel_build_sha.txt
+          git config user.name 'voxel-ci-bot'
+          git config user.email 'actions@users.noreply.github.com'
+          git add ci/last_voxel_build_run.txt ci/last_voxel_build_sha.txt
+          git commit -m 'CI: record voxel APK run id' || exit 0
+          git push origin HEAD:voxel-apk-build
