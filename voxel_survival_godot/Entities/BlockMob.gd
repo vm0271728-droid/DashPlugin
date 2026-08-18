@@ -64,7 +64,8 @@ func _physics_process(delta: float) -> void:
 func take_damage(amount: float, attacker: Node = null) -> void:
     health -= amount
     if attacker != null and attacker is Node3D:
-        var away := global_position - attacker.global_position
+        var attacker_3d: Node3D = attacker as Node3D
+        var away: Vector3 = global_position - attacker_3d.global_position
         away.y = 0.0
         if away.length_squared() > 0.001:
             away = away.normalized()
