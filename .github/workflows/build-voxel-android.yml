@@ -1,0 +1,233 @@
+name: Build Voxel Survival Android
+
+on:
+  push:
+    branches:
+      - voxel-apk-build
+    paths:
+      - 'voxel_survival_godot/**'
+      - '.github/workflows/build-voxel-android.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare Android SDK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          mkdir -p "$HOME/.android"
+          if [ ! -f "$HOME/.android/debug.keystore" ]; then
+            keytool -genkeypair -v \
+              -keystore "$HOME/.android/debug.keystore" \
+              -storepass android \
+              -alias androiddebugkey \
+              -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Generate original procedural assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import math, random, struct, wave, zlib, binascii
+
+          root = Path('voxel_survival_godot')
+          assets = root / 'Assets'
+          sfx = root / 'Audio' / 'SFX'
+          assets.mkdir(parents=True, exist_ok=True)
+          sfx.mkdir(parents=True, exist_ok=True)
+
+          W = H = 64
+          TILE = 16
+          pixels = bytearray(W * H * 4)
+          palette = [
+              ((121,83,55),(90,58,39)),      # dirt
+              ((92,145,57),(63,111,39)),     # grass top
+              ((100,151,63),(112,82,52)),    # grass side
+              ((121,121,121),(88,88,88)),    # stone
+              ((218,199,139),(188,169,112)), # sand
+              ((133,93,53),(92,61,35)),      # log side
+              ((155,112,63),(102,73,42)),    # log top
+              ((71,125,53),(42,91,36)),      # leaves
+              ((104,104,104),(70,70,70)),    # cobble
+              ((94,94,94),(37,37,37)),       # coal ore
+              ((112,105,99),(173,123,91)),   # iron ore
+              ((180,126,72),(139,91,50)),    # planks
+              ((193,226,231),(145,194,204)), # glass
+              ((58,119,196),(36,91,164)),    # water
+              ((74,72,69),(38,37,36)),        # bedrock
+              ((132,126,119),(92,88,84)),    # gravel
+          ]
+
+          rng = random.Random(0x51A7B10C)
+          for tile, (base, dark) in enumerate(palette):
+              tx = (tile % 4) * TILE
+              ty = (tile // 4) * TILE
+              for y in range(TILE):
+                  for x in range(TILE):
+                      checker = ((x * 7 + y * 11 + tile * 5) % 17) < 5
+                      noise = rng.randint(-13, 13)
+                      src = dark if checker else base
+                      r = max(0, min(255, src[0] + noise))
+                      g = max(0, min(255, src[1] + noise))
+                      b = max(0, min(255, src[2] + noise))
+                      a = 190 if tile in (7, 12, 13) else 255
+                      i = ((ty+y) * W + (tx+x)) * 4
+                      pixels[i:i+4] = bytes((r,g,b,a))
+
+          # Add distinctive procedural accents per tile.
+          def put(x, y, rgba):
+              if 0 <= x < W and 0 <= y < H:
+                  i = (y * W + x) * 4
+                  pixels[i:i+4] = bytes(rgba)
+
+          # Grass fringe on grass-side tile.
+          ox, oy = 2*TILE, 0
+          for x in range(TILE):
+              depth = 3 + ((x*5 + 3) % 4)
+              for y in range(depth):
+                  put(ox+x, oy+y, (73 + (x%3)*8, 125 + (x%4)*5, 44, 255))
+          # Log rings.
+          ox, oy = 2*TILE, TILE
+          for r in (2,5,7):
+              for n in range(80):
+                  a = n/80*math.tau
+                  x = int(ox+7.5+math.cos(a)*r)
+                  y = int(oy+7.5+math.sin(a)*r)
+                  put(x,y,(98,67,38,255))
+          # Ore flecks.
+          for tile, color in [(9,(42,42,42,255)),(10,(195,132,94,255))]:
+              ox, oy = (tile%4)*TILE, (tile//4)*TILE
+              rr = random.Random(tile*999)
+              for _ in range(21):
+                  x, y = rr.randrange(2,14), rr.randrange(2,14)
+                  put(ox+x,oy+y,color)
+                  if rr.random()<0.45: put(ox+x+1,oy+y,color)
+          # Plank seams.
+          ox, oy = 3*TILE, 2*TILE
+          for y in (3,8,13):
+              for x in range(TILE): put(ox+x,oy+y,(116,73,41,255))
+          # Water streaks.
+          ox, oy = TILE, 3*TILE
+          for y in (4,10):
+              for x in range(TILE):
+                  if (x+y)%3: put(ox+x,oy+y,(81,145,215,190))
+
+          def chunk(tag, data):
+              return struct.pack('>I', len(data)) + tag + data + struct.pack('>I', binascii.crc32(tag+data)&0xffffffff)
+          raw = b''.join(b'\x00' + pixels[y*W*4:(y+1)*W*4] for y in range(H))
+          png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB',W,H,8,6,0,0,0)) + chunk(b'IDAT', zlib.compress(raw,9)) + chunk(b'IEND', b'')
+          (assets/'block_atlas.png').write_bytes(png)
+
+          RATE = 22050
+          def make_wav(name, duration, tone, noise, decay, seed):
+              rr = random.Random(seed)
+              n = int(RATE*duration)
+              frames = bytearray()
+              for i in range(n):
+                  t = i/RATE
+                  env = max(0.0, 1.0-t/duration) ** decay
+                  v = math.sin(math.tau*tone*t)*0.35 + (rr.random()*2-1)*noise
+                  v += math.sin(math.tau*(tone*0.49)*t)*0.12
+                  sample = int(max(-1,min(1,v*env))*32767)
+                  frames += struct.pack('<h',sample)
+              with wave.open(str(sfx/name),'wb') as wf:
+                  wf.setnchannels(1); wf.setsampwidth(2); wf.setframerate(RATE); wf.writeframes(frames)
+
+          make_wav('break_soft.wav', .18, 92, .52, 1.3, 1)
+          make_wav('break_stone.wav', .16, 146, .65, 1.0, 2)
+          make_wav('place.wav', .10, 112, .42, 1.8, 3)
+          make_wav('step_grass.wav', .085, 80, .36, 1.5, 4)
+          make_wav('step_stone.wav', .075, 180, .30, 1.4, 5)
+          make_wav('ui_click.wav', .045, 660, .03, 2.4, 6)
+          PY
+          file voxel_survival_godot/Assets/block_atlas.png
+          file voxel_survival_godot/Audio/SFX/*.wav
+
+      - name: Install Godot 4.3 and export templates
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -fL --retry 5 --retry-delay 3 \
+            -o /tmp/godot.zip \
+            https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_linux.x86_64.zip
+          unzip -q /tmp/godot.zip -d /tmp/godot
+          sudo install -m 0755 /tmp/godot/Godot_v4.3-stable_linux.x86_64 /usr/local/bin/godot
+
+          curl -fL --retry 5 --retry-delay 3 \
+            -o /tmp/templates.tpz \
+            https://github.com/godotengine/godot-builds/releases/download/4.3-stable/Godot_v4.3-stable_export_templates.tpz
+          rm -rf /tmp/export-templates
+          mkdir -p /tmp/export-templates
+          unzip -q /tmp/templates.tpz -d /tmp/export-templates
+          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.3.stable"
+          mkdir -p "$TEMPLATE_DIR"
+          cp -a /tmp/export-templates/templates/. "$TEMPLATE_DIR/"
+          godot --version
+          test -f "$TEMPLATE_DIR/android_debug.apk"
+
+      - name: Configure Godot Android paths
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$HOME/.config/godot"
+          cat > "$HOME/.config/godot/editor_settings-4.tres" <<EOF
+          [gd_resource type="EditorSettings" format=3]
+
+          [resource]
+          export/android/android_sdk_path = "$ANDROID_HOME"
+          export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          EOF
+
+      - name: Import and parse project
+        shell: bash
+        working-directory: voxel_survival_godot
+        run: |
+          set -euxo pipefail
+          godot --headless --editor --path . --quit-after 20
+          godot --headless --path . --quit-after 10
+
+      - name: Export Android APK
+        shell: bash
+        working-directory: voxel_survival_godot
+        run: |
+          set -euxo pipefail
+          mkdir -p build
+          godot --headless --path . --export-debug "Android" build/VoxelSurvival.apk
+          test -s build/VoxelSurvival.apk
+          file build/VoxelSurvival.apk
+          unzip -t build/VoxelSurvival.apk >/dev/null
+          sha256sum build/VoxelSurvival.apk | tee build/VoxelSurvival.apk.sha256
+          ls -lh build/VoxelSurvival.apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VoxelSurvival-APK
+          path: voxel_survival_godot/build/VoxelSurvival.apk
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
