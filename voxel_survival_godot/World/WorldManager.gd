@@ -141,7 +141,9 @@ func _refresh_streaming(force: bool) -> void:
                 desired.append(center + Vector2i(dx, dz))
     desired.sort_custom(func(a: Vector2i, b: Vector2i) -> bool: return a.distance_squared_to(center) < b.distance_squared_to(center))
 
+    var desired_lookup: Dictionary = {}
     for coord in desired:
+        desired_lookup[coord] = true
         if not loaded_chunks.has(coord) and not _generation_queue.has(coord):
             _generation_queue.append(coord)
 
@@ -161,7 +163,7 @@ func _refresh_streaming(force: bool) -> void:
 func _process_generation_queue() -> void:
     var budget := chunks_generated_per_frame
     while budget > 0 and not _generation_queue.is_empty():
-        var coord := _generation_queue.pop_front()
+        var coord: Vector2i = _generation_queue.pop_front()
         if not loaded_chunks.has(coord):
             request_chunk(coord, false)
         budget -= 1
@@ -169,9 +171,9 @@ func _process_generation_queue() -> void:
 func _process_rebuild_queue() -> void:
     var budget := chunks_meshed_per_frame
     while budget > 0 and not _rebuild_queue.is_empty():
-        var coord := _rebuild_queue.pop_front()
+        var coord: Vector2i = _rebuild_queue.pop_front()
         _rebuild_lookup.erase(coord)
-        var node: ChunkNode = chunk_nodes.get(coord)
+        var node: ChunkNode = chunk_nodes.get(coord) as ChunkNode
         if node != null:
             var with_collision := false
             if tracking_target != null:
@@ -190,7 +192,7 @@ func _unload_chunk(coord: Vector2i) -> void:
     _generation_queue.erase(coord)
     _rebuild_lookup.erase(coord)
     _rebuild_queue.erase(coord)
-    var node: ChunkNode = chunk_nodes.get(coord)
+    var node: ChunkNode = chunk_nodes.get(coord) as ChunkNode
     if node != null:
         node.queue_free()
     chunk_nodes.erase(coord)
